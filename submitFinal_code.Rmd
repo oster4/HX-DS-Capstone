@@ -1,0 +1,212 @@
+---
+title: "HX Capstone - Adult Census Data"
+output:
+  word_document: default
+  html_notebook: default
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+## 1. Dataset description and project goals
+
+These data were extracted from the 1994 Census bureau database by Ronny Kohavi and Barry Becker (Data Mining and Visualization, Silicon Graphics). A set of reasonably clean records was extracted using the following conditions: ((AAGE>16) && (AGI>100) && (AFNLWGT>1) && (HRSWK>0)). The prediction task is to determine whether a person makes over $50K a year.
+
+Description of fnlwgt (final weight):
+
+The weights on the Current Population Survey (CPS) files are controlled to independent estimates of the civilian population of the US. These are prepared monthly for us by Population Division here at the Census Bureau. We use 3 sets of controls. These are:
+
+    A single cell estimate of the population 16+ for each state.
+    Controls for Hispanic Origin by age and sex.
+    Controls by Race, age and sex.
+
+We use all three sets of controls in our weighting program and "rake" through them 6 times so that by the end we come back to all the controls we used. The term estimate refers to population totals derived from CPS by creating "weighted tallies" of any specified socio-economic characteristics of the population. People with similar demographic characteristics should have similar weights. There is one important caveat to remember about this statement. That is that since the CPS sample is actually a collection of 51 state samples, each with its own probability of selection, the statement only applies within state.
+
+Relevant papers:
+Ron Kohavi, "Scaling Up the Accuracy of Naive-Bayes Classifiers: a Decision-Tree Hybrid", Proceedings of the Second International Conference on Knowledge Discovery and Data Mining, 1996. (PDF)
+
+Once again, we will be building a model to predict whether a person's income exceeds $50K/yr based on census data.
+
+The datasets (adult.data and adult.test) can be downloaded directly from http://archive.ics.uci.edu/ml/machine-learning-databases/adult/ or by using the code below.  Alternatively, the datasets and the code are also available on my github site https://github.com/oster4/HX-DS-Capstone.  
+
+## 2. Ingesting and exploring the data
+
+First, let's download the required libraries.
+```{r}
+suppressMessages(if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org"))
+suppressMessages(if(!require(corrplot)) install.packages("corrplot", repos = "http://cran.us.r-project.org"))
+suppressMessages(if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org"))
+suppressMessages(if(!require(e1071)) install.packages("e1071", repos = "http://cran.us.r-project.org"))
+suppressMessages(if(!require(randomForest)) install.packages("randomForest", repos = "http://cran.us.r-project.org"))
+suppressMessages(if(!require(magrittr)) install.packages("magrittr", repos = "http://cran.us.r-project.org"))
+```
+
+Let's download the training and testing datasets:
+```{r}
+tmp_train <- tempfile()
+download.file("http://archive.ics.uci.edu/ml/machine-learning-databases/adult/adult.data", tmp_train)
+adult_train <- read.csv(tmp_train, header = FALSE, sep = ",")
+```
+
+```{r}
+tmp_test <- tempfile()
+download.file("http://archive.ics.uci.edu/ml/machine-learning-databases/adult/adult.test", tmp_test)
+adult_test <- read.csv(tmp_test, skip = 1, header = FALSE, sep = ",")
+```
+
+Let's attach comlumn names:
+```{r}
+headers = c("age", "workclass", "fnlweight", "education", "eduyears", "marital", "occupation", "relationship", "race", "sex", "capgain",
+            "caploss", "hours", "country", "income")
+colnames(adult_train) <- headers
+colnames(adult_test) <- headers
+```
+
+Let's create respective csv files on the hard drive for future use (optional, uncomment if you'd like to run):
+```{r}
+# write.csv(adult_train, file = "adult_train.csv", row.names = FALSE)
+# write.csv(adult_test, file = "adult_test.csv", row.names = FALSE)
+```
+
+Let's combine the training and testing datasets for holistic overview, and check for NA values:
+```{r}
+adult_all <- rbind(adult_train, adult_test)
+sum(is.na(adult_all))
+```
+
+The dataset appears to be well populated, but let's summarize it to check for any other issues:
+```{r}
+summary(adult_all)
+```
+
+Workclass column has "?" and several columns have "Other", so we need to break those down to understand if any adjustments are necessary:
+```{r}
+workclass_values <- unique(adult_all$workclass); workclass_values
+```
+
+Review of the data structure:
+```{r}
+str(adult_all)
+```
+
+```{r}
+education_values <- unique(adult_all$education); education_values
+```
+
+```{r}
+country_values <- unique(adult_all$country); country_values
+```
+
+Later we'll need to replace "?" with "Unknown", and consider whether using the highest attained degree ("education") is meaningful while years of education ("eduyears") is also available. Also, the testing dataset has an extra dot available in the income column, which we'll need to remove.
+
+Let's look at some charts to get a better sense of the distributions:
+```{r}
+ggplot(adult_all, aes(workclass)) + geom_bar(colour="blue", fill="blue") + ggtitle("Work Classification") +
+  theme_minimal() + coord_flip() + ylab("Count") + xlab("")
+ggplot(adult_all, aes(education)) + geom_bar(colour="forestgreen", fill="forestgreen") + ggtitle("Education Level") + 
+  theme_minimal() + coord_flip() + xlab("")
+ggplot(adult_all, aes(eduyears)) + geom_histogram(colour="black", fill="darkgreen", binwidth = 1) + ggtitle("Education Years") + 
+  theme_minimal() + xlab("")
+ggplot(adult_all, aes(occupation)) + geom_bar(colour="orange", fill="orange") + ggtitle("Occupation") + 
+  theme_minimal() + coord_flip() + xlab("")
+ggplot(adult_all, aes(marital)) + geom_bar(colour="darkred", fill="darkred") + ggtitle("Marital Status") + 
+  theme_minimal() + coord_flip() + xlab("")
+ggplot(adult_all, aes(age)) + geom_density(colour="steelblue", fill="steelblue") + ggtitle("Age") + theme_minimal() + xlab("")
+ggplot(adult_all, aes(hours)) + geom_histogram(colour="#33FF99", fill="#33FF99", binwidth = 3) + ggtitle("Hours Per Week") + 
+  theme_minimal() + xlab("")
+ggplot(adult_all, aes(sex)) + geom_bar(colour="#330099", fill="#330099") + ggtitle("Gender") + theme_minimal() + xlab("")
+```
+
+We can see that the majority of subjects work in private businesses, ara high school graduates, obtained bachelors degree or some college (with the corresponding peaks in education years).  Occupation-wise, the distribution is rather broad.  Majority of the subjects are between 20 and 40 years old, and two thirds are male.
+
+Time to do some clean-up on the training and testing datasets.  First, let's confirm that the "50k" column is factorized: 
+```{r}
+str(adult_train$income)
+```
+
+Income is already factorized, so can keep the existing values, except we need to remove "." from the test set predicted values to ensure that the predicted values are identical (there is no "." at the end of the predicted value in the training set).
+```{r}
+adult_test <- adult_test %>% mutate(income = recode(income, " <=50K." = " <=50K", " >50K." = " >50K"))
+```
+
+Let's also convert "?" in work classification into "Unknown".  I do not plan on categorizing this entry as an NA, in part due to its abundance and in part due to the possibility that there is something about people who do not disclose this information that could yield predictive value.
+```{r}
+adult_train <- adult_train %>% mutate(workclass = recode(workclass, " ?" = "Unknown"))
+adult_test <- adult_test %>% mutate(workclass = recode(workclass, " ?" = "Unknown"))
+```
+
+Let's look at the correlations, but first convert the dataframe into a matrix:
+```{r}
+adult_train_num <- as.matrix(sapply(adult_train, as.numeric)) 
+correlation <- cor(adult_train_num, method = c("pearson"))
+corrplot(correlation, method = "circle", type = 'upper', order = 'hclust')
+```
+The only somewhat interesing positive correlation for our target prediction (income above or below 50k) is with years of education.  Let's move into the analysis stage.
+
+## 3. Analysis and Results
+
+Let's start with the principal component analysis to see how much variance all of the features explain individually, and if some of them can be immediately dropped.
+```{r}
+pca <- prcomp(adult_train_num[,1:14], scale. = TRUE)
+summary(pca)
+```
+
+It appears all 14 variables have a meaningful role in explaining variances, and especially top 8:
+```{r}
+screeplot(pca, type="lines",col="blue")
+```
+
+Here, we can chart cumulative contribution of all 14 principal components:
+```{r}
+var <- pca$sdev^2
+propvar <- var/sum(var)
+plot(cumsum(propvar), xlab = "Principal Component", ylab = "Cumulative Proportion of Variance Explained",ylim = c(0,1), type = "b")
+```
+
+All of the components have significant enough contribution in explaining variance.  Next, let's start our predictive analytics with Naive Bayes:
+```{r}
+model_naiveBayes <- naiveBayes(income ~ ., data = adult_train)
+pred_naiveBayes <- predict(model_naiveBayes, newdata=adult_test)
+(table_naiveBayes <- table(adult_test$income, pred_naiveBayes))
+confusionMatrix(pred_naiveBayes, adult_test$income)
+error_naiveBayes <- 1 - sum(table_naiveBayes[row(table_naiveBayes)==col(table_naiveBayes)])/sum(table_naiveBayes)
+(error_rate <- data_frame(Method = "Naive Bayes", Error_Rate = error_naiveBayes))
+```
+
+The method resulted in just over 17% error rate, let's see if we can do better with logistic regression:
+```{r}
+model_logReg <- glm(income ~ . , data = adult_train, family = "binomial")
+pred_logReg <- predict(model_logReg, newdata=adult_test, type = "response")
+predbinary_logReg <- as.factor(ifelse(pred_logReg > 0.5, " >50K", " <=50K"))
+(table_logReg <- table(adult_test$income, predbinary_logReg))
+confusionMatrix(predbinary_logReg, adult_test$income)
+error_logReg <- 1 - sum(table_logReg[row(table_logReg)==col(table_logReg)])/sum(table_logReg)
+error_rate <- bind_rows(error_rate, data_frame(Method="Logistic Regression", Error_Rate = error_logReg))
+error_rate %>% knitr::kable()
+```
+
+Finally, let's try Random Forests, but first need convert factor variables into numeric:
+```{r}
+numCols <- c('workclass', 'education', 'marital', 'occupation', 'relationship', 'race', 'sex', 'country')
+adult_train_num <- adult_train
+adult_train_num[,numCols] %<>% lapply(function(x) as.numeric(x))
+adult_test_num <- adult_test
+adult_test_num[,numCols] %<>% lapply(function(x) as.numeric(x))
+```
+
+```{r}
+model_RF <- randomForest(income~., data=adult_train_num, ntree=400)
+pred_RF <- predict(model_RF, adult_test_num, type = "response")
+(table_RF <- table(adult_test_num$income, pred_RF))
+error_RF = 1 - sum(table_RF[row(table_RF)==col(table_RF)])/sum(table_RF)
+confusionMatrix(pred_RF, adult_test_num$income)
+error_rate <- bind_rows(error_rate, data_frame(Method="Random Forests", Error_Rate = error_RF))
+error_rate %>% knitr::kable()
+```
+
+## Conclusion
+
+Having applied three algorithms - Naive Bayes, Logistic Regression, and Random Forests - the latter turned out to be the most accurate in predicting whether an individual is earning above 50k or not.  Random Forests accuracy reached 86.3% (error rate of 13.7%) and, even more importantly, the Kappa value (a metric that compares an Observed Accuracy with random chance) was a significant 0.59.
+
+
+
